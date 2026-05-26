@@ -1,0 +1,149 @@
+# viewer3d.py
+import sys
+import math
+import pyglet
+import moderngl
+from PIL import Image
+from pyglet.window import key, mouse
+
+
+class Viewer3D(pyglet.window.Window):
+    def __init__(self, mesh_path, texture_path, **kwargs):
+        super().__init__(width=1024, height=768, caption="Dino Preview", resizable=True, **kwargs)
+        self.ctx = moderngl.create_context()
+
+        # Simple shader
+        self.prog = self.ctx.program(
+            vertex_shader='''
+                #version 330
+                in vec3 in_pos;
+                in vec2 in_uv;
+                uniform mat4 mvp;
+                out vec2 v_uv;
+                void main() {
+                    v_uv = in_uv;
+                    gl_Position = mvp * vec4(in_pos, 1.0);
+                }
+            ''',
+            fragment_shader='''
+                #version 330
+                in vec2 v_uv;
+                out vec4 f_color;
+                uniform sampler2D tex0;
+                void main() {
+                    f_color = texture(tex0, v_uv);
+                }
+            ''',
+        )
+
+        # TODO: replace this with real mesh loading (OBJ/GLTF)
+        # For now: a textured quad
+        vertices = self.ctx.buffer(
+            data=(
+                # x, y, z,   u, v
+                -1.0, -1.0, 0.0, 0.0, 0.0,
+                 1.0, -1.0, 0.0, 1.0, 0.0,
+                 1.0,  1.0, 0.0, 1.0, 1.0,
+                -1.0,  1.0, 0.0, 0.0, 1.0,
+            )
+        )
+        indices = self.ctx.buffer(data=(0, 1, 2, 2, 3, 0))
+
+        self.vao = self.ctx.vertex_array(
+            self.prog,
+            [
+                (vertices, "3f 2f", "in_pos", "in_uv"),
+            ],
+            indices,
+        )
+
+        # Load texture
+        img = Image.open(texture_path).transpose(Image.FLIP_TOP_BOTTOM).convert("RGBA")
+        self.texture = self.ctx.texture(img.size, 4, img.tobytes())
+        self.texture.build_mipmaps()
+        self.texture.use(location=0)
+
+        # Camera
+        self.angle = 0.0
+        self.distance = 3.0
+
+    def on_draw(self):
+        self.clear()
+        self.ctx.enable(moderngl.DEPTH_TEST)
+
+        # Simple orbit camera around Z
+        aspect = self.width / self.height
+        proj = self._perspective(60.0, aspect, 0.1, 100.0)
+        view = self._look_at(
+            (math.sin(self.angle) * self.distance, 1.5, math.cos(self.angle) * self.distance),
+            (0.0, 0.5, 0.0),
+            (0.0, 1.0, 0.0),
+        )
+        mvp = self._mul_mat4(proj, view)
+
+        self.prog["mvp"].write(mvp)
+        self.vao.render()
+
+    def on_mouse_drag(self, x, y, dx, dy, buttons, modifiers):
+        if buttons & mouse.LEFT:
+            self.angle += dx * 0.01
+
+    def on_mouse_scroll(self, x, y, scroll_x, scroll_y):
+        self.distance -= scroll_y * 0.2
+        self.distance = max(1.0, min(10.0, self.distance))
+
+    # --- minimal mat4 helpers (column-major) ---
+    def _perspective(self, fov_deg, aspect, z_near, z_far):
+        f = 1.0 / math.tan(math.radians(fov_deg) / 2.0)
+        nf = 1.0 / (z_near - z_far)
+        return (
+            f / aspect, 0, 0, 0,
+            0, f, 0, 0,
+            0, 0, (z_far + z_near) * nf, -1,
+            0, 0, (2 * z_far * z_near) * nf, 0,
+        )
+
+    def _look_at(self, eye, target, up):
+        ex, ey, ez = eye
+        tx, ty, tz = target
+        ux, uy, uz = up
+
+        fx, fy, fz = tx - ex, ty - ey, tz - ez
+        fl = math.sqrt(fx*fx + fy*fy + fz*fz)
+        fx, fy, fz = fx/fl, fy/fl, fz/fl
+
+        sx = fy*uz - fz*uy
+        sy = fz*ux - fx*uz
+        sz = fx*uy - fy*ux
+        sl = math.sqrt(sx*sx + sy*sy + sz*sz)
+        sx, sy, sz = sx/sl, sy/sl, sz/sl
+
+        ux, uy, uz = sy*fz - sz*fy, sz*fx - sx*fz, sx*fy - sy*fx
+
+        return (
+            sx, ux, -fx, 0,
+            sy, uy, -fy, 0,
+            sz, uz, -fz, 0,
+            -(sx*ex + sy*ey + sz*ez),
+            -(ux*ex + uy*ey + uz*ez),
+            fx*ex + fy*ey + fz*ez,
+            1,
+        )
+
+    def _mul_mat4(self, a, b):
+        # a, b are 16-element tuples (column-major)
+        out = [0.0] * 16
+        for c in range(4):
+            for r in range(4):
+                out[c*4 + r] = sum(a[k*4 + r] * b[c*4 + k] for k in range(4))
+        return bytes((float(x) for x in out))
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python viewer3d.py path/to/texture.png")
+        sys.exit(1)
+
+    tex_path = sys.argv[1]
+    win = Viewer3D(mesh_path=None, texture_path=tex_path)
+    pyglet.app.run()
